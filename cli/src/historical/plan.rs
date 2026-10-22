@@ -87,41 +87,10 @@ pub(super) fn refuse_conflicts(
             }
         }
     }
-    // A fork's snapshot carries only generated accounts; other declared account
-    // images would be
-    // dropped and the fork would serve the boundary's own account in their
-    // place. Clone entries
-    // name addresses only, which the fork hydrates from its boundary when they
-    // are read.
-    let declared = |entries: Option<usize>| entries.is_some_and(|count| count > 0);
-    if declared(
-        test_validator
-            .as_ref()
-            .and_then(|test| test.genesis.as_ref().map(Vec::len)),
-    ) {
-        bail!(
-            "UNSUPPORTED_HISTORICAL_CONFIG: [[test.genesis]] is not installed on a historical \
-             fork; install the program in the test with HistoricalFork installProgram (Rust: \
-             install_program)"
-        );
-    }
     if let Some(validator) = test_validator
         .as_ref()
         .and_then(|test| test.validator.as_ref())
     {
-        for (key, entries) in [
-            ("account", validator.account.as_ref().map(Vec::len)),
-            ("account_dir", validator.account_dir.as_ref().map(Vec::len)),
-        ] {
-            if declared(entries) {
-                bail!(
-                    "UNSUPPORTED_HISTORICAL_CONFIG: [[test.validator.{key}]] is not installed on \
-                     a historical fork, which would serve the boundary's account instead; declare \
-                     generated fund_accounts/mints/token_accounts or set the account in the test \
-                     with HistoricalFork setAccount (Rust: set_account)"
-                );
-            }
-        }
         if validator.url.is_some() {
             bail!(
                 "UNSUPPORTED_HISTORICAL_CONFIG: [test.validator] url is not used by a historical \

@@ -283,6 +283,7 @@ impl HistoricalFork {
                         }
                         last = format!("startup {phase}");
                         if phase == "ready" && runs.iter().all(|run| !run["completedAt"].is_null()) {
+                            self.check_fixtures()?;
                             return self.check_rent();
                         }
                     }
@@ -292,6 +293,32 @@ impl HistoricalFork {
             thread::sleep(Duration::from_millis(100));
         }
         Err(error("STARTUP_TIMEOUT", format!("not ready within {timeout:?} (last: {last}); raise [surfpool] startup_wait or see {}", self.log.display())))
+    }
+
+    fn check_fixtures(&self) -> Result<()> {
+        // Only Anchor's leading compiled snapshot; extra_args may contain
+        // unrelated snapshots with remote/null entries.
+        if self.plan.args.get(1).map(String::as_str) != Some("--snapshot") {
+            return Ok(());
+        }
+        {
+            let path = self.plan.args.get(2).ok_or_else(|| error("PLAN_SCHEMA", "compiled snapshot path missing"))?;
+            let images: Value = serde_json::from_slice(&fs::read(path)
+                .map_err(|e| error("FIXTURES", e.to_string()))?)
+                .map_err(|e| error("FIXTURES", e.to_string()))?;
+            let images = images.as_object().ok_or_else(|| error("FIXTURES", "invalid snapshot"))?;
+            for (pubkey, image) in images {
+                let result = self.call("getAccountInfo", json!([pubkey, {"encoding":"base64", "commitment":"processed"}]))
+                    .map_err(|e| error("FIXTURES", e))?;
+                let actual = &result["value"];
+                if actual.is_null() || actual["lamports"] != image["lamports"]
+                    || actual["owner"] != image["owner"] || actual["executable"] != image["executable"]
+                    || actual["data"][0] != image["data"] {
+                    return Err(error("FIXTURE_MISMATCH", format!("{pubkey} differs from its declared image after startup")));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Anchor funded generated mint/token images with its default rent; the

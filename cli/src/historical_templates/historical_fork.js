@@ -65,7 +65,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class HistoricalFork {
   /**
-   * Starts a historical Surfpool fork after `after` (a transaction signature or slot).
+   * Starts a historical Surfpool fork after `after`, a transaction signature
+   * or slot.
    * `dataDir` optionally selects Surfpool's historical cache directory.
    */
   static async start({ after, dataDir, startupTimeoutMs } = {}) {
@@ -157,7 +158,9 @@ class HistoricalFork {
     return value.result;
   }
 
-  /** Surfpool's own typed startup failure (`Error: CODE: message`), or a generic exit. */
+  /**
+   * Surfpool's typed startup failure (`Error: CODE: message`), or a generic exit.
+   */
   #exitError(status) {
     let text = "";
     let unreadable = "";
@@ -193,6 +196,7 @@ class HistoricalFork {
           if (failed.length) throw new HistoricalForkError("FIXTURES", JSON.stringify(failed));
           last = `startup ${info.startup.phase}, runbooks ${JSON.stringify(info.runbookExecutions.map((run) => run.completedAt))}`;
           if (info.startup.phase === "ready" && info.runbookExecutions.every((run) => run.completedAt != null) && !exit) {
+            await this.#checkFixtures();
             this.#verified = true;
             await this.#checkRent();
             return;
@@ -208,7 +212,10 @@ class HistoricalFork {
     throw new HistoricalForkError("STARTUP_TIMEOUT", `not ready within ${timeoutMs} ms (last: ${last}); raise [surfpool] startup_wait or see ${this.#logPath}`);
   }
 
-  /** Anchor funded generated mint/token images with its default rent; the boundary decides. */
+  /**
+   * Anchor funded generated mint/token images with its default rent;
+   * the boundary decides.
+   */
   async #checkRent() {
     for (const check of this.#launch.rentChecks) {
       const minimum = await this.#call("getMinimumBalanceForRentExemption", [check.dataLength]);
@@ -218,13 +225,34 @@ class HistoricalFork {
     }
   }
 
-  /** An RPC call to this verified fork, including Surfpool's explicit `surfnet_*` controls. */
+  async #checkFixtures() {
+    const args = this.#launch.surfpool.args;
+    // The plan starts with `start`, then Anchor's compiled snapshot if any.
+    // Later snapshots belong to extra_args and may contain remote/null entries.
+    if (args[1] !== "--snapshot") return;
+    {
+      const images = JSON.parse(readFileSync(args[2], "utf8"));
+      for (const [pubkey, image] of Object.entries(images)) {
+        const actual = (await this.#call("getAccountInfo", [pubkey, { encoding: "base64", commitment: "processed" }])).value;
+        if (!actual || actual.lamports !== image.lamports || actual.owner !== image.owner
+            || actual.executable !== image.executable || actual.data[0] !== image.data) {
+          throw new HistoricalForkError("FIXTURE_MISMATCH", `${pubkey} differs from its declared image after startup`);
+        }
+      }
+    }
+  }
+
+  /**
+   * An RPC call to this verified fork, including explicit `surfnet_*` controls.
+   */
   async rpc(method, params = []) {
     if (!this.#verified || this.#closed) throw new HistoricalForkError("NOT_READY", "this fork is not running");
     return this.#call(method, params);
   }
 
-  /** An Anchor provider for this fork; `keypair` defaults to the workspace wallet. */
+  /**
+   * An Anchor provider for this fork; `keypair` defaults to the workspace wallet.
+   */
   provider(keypair, options = { commitment: "processed", preflightCommitment: "processed" }) {
     if (!this.#verified || this.#closed) throw new HistoricalForkError("NOT_READY", "this fork is not running");
     const signer = keypair ?? anchor.web3.Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(this.#launch.wallet, "utf8"))));
@@ -233,15 +261,18 @@ class HistoricalFork {
     return new anchor.AnchorProvider(connection, new anchor.Wallet(signer), options);
   }
 
-  /** Defines an account in this fork only, such as a fresh test account or wallet funding. */
+  /**
+   * Defines an account in this fork only, e.g. a test account or wallet funding.
+   */
   async setAccount(pubkey, { lamports = 0, owner = SYSTEM_PROGRAM, data = Buffer.alloc(0), executable = false } = {}) {
     return this.rpc("surfnet_setAccount", [pubkey.toString(), { lamports, owner: owner.toString(), data: Buffer.from(data).toString("hex"), executable, rentEpoch: 0 }]);
   }
 
   /**
-   * Fast ELF setup through Surfpool's program-writing helper: installs an upgradeable program
-   * at `programId` in this fork. It is not a loader deployment; use a real deployment to test
-   * the loader. The program becomes callable after the next explicit `advance()`.
+   * Fast ELF setup through Surfpool's program-writing helper: installs an
+   * upgradeable program at `programId` in this fork. This is not a loader
+   * deployment; use a real deployment to test the loader. The program becomes
+   * callable after the next explicit `advance()`.
    */
   async installProgram(programId, soPath, authority) {
     const elf = readFileSync(soPath);
@@ -266,9 +297,9 @@ class HistoricalFork {
   }
 
   /**
-   * Stops this fork's own child process; never signals or calls another listener. Remove event
-   * and account listeners first: the WebSocket of each provider made by `provider()` is closed
-   * here so @solana/web3.js does not keep reconnecting to the stopped fork.
+   * Stops this fork's own child; never signals or calls another listener.
+   * Remove event and account listeners first: each `provider()` WebSocket is
+   * closed here so @solana/web3.js does not reconnect to the stopped fork.
    */
   async close() {
     if (this.#closed) return;

@@ -218,68 +218,51 @@ fn conflicting_surfpool_and_validator_settings_are_refused_not_ignored() {
 }
 
 #[test]
-fn fixtures_a_fork_does_not_install_are_refused_not_dropped() {
+fn historical_legacy_fixture_configuration_is_supported() {
+    let address = Pubkey::new_unique().to_string();
+    let test = TestValidator {
+        genesis: Some(vec![crate::config::GenesisEntry {
+            address: address.clone(),
+            program: "fixture.so".into(),
+            upgradeable: Some(true),
+        }]),
+        validator: Some(Validator {
+            account: Some(vec![crate::config::AccountEntry {
+                address,
+                filename: "fixture.json".into(),
+            }]),
+            account_dir: Some(vec![crate::config::AccountDirEntry {
+                directory: "accounts".into(),
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    plan::refuse_conflicts(&None, &Some(test)).unwrap();
+}
+
+#[test]
+fn historical_validator_url_is_refused_not_ignored() {
     let address = Pubkey::new_unique().to_string();
     let validator = |validator: Validator| TestValidator {
         validator: Some(validator),
         ..Default::default()
     };
-    for (test_validator, key, guidance) in [
-        (
-            validator(Validator {
-                account: Some(vec![crate::config::AccountEntry {
-                    address: address.clone(),
-                    filename: "a.json".into(),
-                }]),
-                ..Default::default()
-            }),
-            "[[test.validator.account]]",
-            "setAccount",
-        ),
-        (
-            validator(Validator {
-                account_dir: Some(vec![crate::config::AccountDirEntry {
-                    directory: "accounts".into(),
-                }]),
-                ..Default::default()
-            }),
-            "[[test.validator.account_dir]]",
-            "setAccount",
-        ),
-        (
-            validator(Validator {
-                url: Some("https://api.mainnet-beta.solana.com".into()),
-                ..Default::default()
-            }),
-            "[test.validator] url",
-            "[historical] provider",
-        ),
-        (
-            TestValidator {
-                genesis: Some(vec![crate::config::GenesisEntry {
-                    address: address.clone(),
-                    program: "p.so".into(),
-                    upgradeable: None,
-                }]),
-                ..Default::default()
-            },
-            "[[test.genesis]]",
-            "installProgram",
-        ),
-    ] {
-        let message = plan::refuse_conflicts(&None, &Some(test_validator))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            message.starts_with("UNSUPPORTED_HISTORICAL_CONFIG: ")
-                && message.contains(key)
-                && message.contains(guidance),
-            "{message}"
-        );
-    }
-    // Generated accounts are what the historical snapshot carries, clone
-    // addresses hydrate from
-    // the boundary when read, and empty lists declare nothing.
+    let test_validator = validator(Validator {
+        url: Some("https://api.mainnet-beta.solana.com".into()),
+        ..Default::default()
+    });
+    let message = plan::refuse_conflicts(&None, &Some(test_validator))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.starts_with("UNSUPPORTED_HISTORICAL_CONFIG: ")
+            && message.contains("[test.validator] url")
+            && message.contains("[historical] provider"),
+        "{message}"
+    );
+    // Fixture accounts are local overrides; clone addresses hydrate from the
+    // boundary when read, and empty lists declare nothing.
     let supported = validator(Validator {
         account: Some(vec![]),
         clone: Some(vec![crate::config::CloneEntry { address }]),

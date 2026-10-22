@@ -73,16 +73,31 @@ forks left by a crashed test process. No operation is sent to mainnet.
 
 ## Fixtures and limits
 
-The ordinary fixture compiler supplies `[test.validator]` `fund_accounts`, `mints`
-and `token_accounts` to every fork. Known clone addresses are loaded lazily from
-the chosen boundary, not copied from current mainnet state.
+Every fork loads `fund_accounts`, `mints`, `token_accounts`,
+`[[test.validator.account]]`, `[[test.validator.account_dir]]`, and
+`[[test.genesis]]`. Account files contain Solana CLI account JSON; directory
+entries need a `pubkey`. An explicit account `address` overrides the file's
+pubkey (`address = "-"` uses the file's pubkey). Paths in Test.toml are relative
+to that suite. Malformed files, duplicate addresses and installation mismatches
+fail visibly. Account bytes, owner, balance and executable flag are checked
+before the test runs.
+Verification is after explicit startup runbooks: change declared fixture state
+in test code instead, or it fails with `FIXTURE_MISMATCH`. Snapshots supplied
+through `extra_args` remain Surfpool-owned and are not compared by Anchor.
 
-Historical suites refuse these configurations before installing fixtures:
+Fixtures replace boundary state at their addresses. Genesis programs are
+callable at the frozen boundary without `advance()`; `upgradeable = true`
+sets the workspace wallet as authority. A raw `surfnet_resetNetwork` discards
+local overrides; start a new fork to reinstall fixtures. Known clone addresses
+are loaded lazily from the chosen boundary, not copied from current state.
+Fork startup disables automatic deployment runbooks even without `--skip-deploy`:
+install or deploy workspace programs in test code after selecting the boundary.
 
-- `[[test.validator.account]]` and `[[test.validator.account_dir]]`: use
-  `setAccount` in the test instead.
-- `[[test.genesis]]`: use `installProgram` in the test instead.
-- `[test.validator] url`: select the archive through `[historical]` instead.
+Historical suites still refuse `[test.validator] url`, chain/runtime overrides
+(`warp_slot`, `slots_per_epoch`, `ticks_per_slot`, `deactivate_feature`,
+`geyser_plugin_config`), datasource URLs, automatic block production and
+fork-owned endpoint/provider options in `extra_args`. Configure archive access
+through `[historical]`, and advance time explicitly in the test.
 
 Missing provider data returns an explicit error; it never falls back to the tip.
 Some historical queries require indexes the provider does not supply. Durable

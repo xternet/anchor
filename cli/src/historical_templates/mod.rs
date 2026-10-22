@@ -82,11 +82,17 @@ signature). The fork's clock is frozen: it moves only when a test calls `advance
 The test funds its wallet and installs this build of the program with Surfpool's fast
 program-writing helper (`installProgram`), which is not a loader deployment. Accounts the test
 creates are declared first (`setAccount`). Remove event and account listeners before `close()`. These are local, hypothetical changes, never sent to
-mainnet. `anchor test` applies the generated `[test.validator]` fixtures (`fund_accounts`, `mints`,
-`token_accounts`) to every fork and terminates any fork a crashed test leaves behind. It refuses
-`[[test.validator.account]]`, `[[test.validator.account_dir]]`, `[[test.genesis]]` and
-`[test.validator] url` (`UNSUPPORTED_HISTORICAL_CONFIG`): set accounts with `setAccount`, install
-programs with `installProgram`, and read history through the `[historical]` provider.
+mainnet. Every fork loads generated fixtures (`fund_accounts`, `mints`, `token_accounts`),
+declared account JSON files/directories, and genesis programs. These local images override
+boundary state at their addresses; malformed or conflicting fixtures fail instead of being
+silently skipped. Startup verifies the installed bytes, owner, balance and executable flag.
+Genesis programs use slot-zero ProgramData and are callable without advancing the boundary;
+`upgradeable = true` gives the workspace wallet upgrade authority. A raw network reset discards
+local fixture overrides; start a fresh fork to apply them again.
+Anchor terminates any fork a crashed test leaves behind. `[test.validator] url` is refused
+(`UNSUPPORTED_HISTORICAL_CONFIG`): configure archive access through `[historical]` instead.
+Fork startup never runs automatic deployment runbooks: install or deploy test programs inside
+the fork. This is independent of the CLI's `--skip-deploy` option.
 `[[test.validator.clone]]` addresses are not copied up front: reading a known address hydrates it
 from the boundary. Missing history or an unsupported runtime fails: nothing
 falls back to current state.

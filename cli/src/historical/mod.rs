@@ -67,7 +67,7 @@ pub(crate) fn prepare_suite(
     test_validator: &Option<TestValidator>,
     surfpool_config: &Option<SurfpoolConfig>,
     validator_type: ValidatorType,
-    skip_deploy: bool,
+    _skip_deploy: bool,
     detach: bool,
 ) -> Result<Option<SuitePlan>> {
     let Some(provider_config) = config_path(cfg)? else {
@@ -93,9 +93,12 @@ pub(crate) fn prepare_suite(
     let generated = crate::generated_validator_accounts(cfg, test_validator)?;
     let normal = crate::surfpool_flags(
         cfg,
+        test_validator,
         surfpool_config,
         false,
-        skip_deploy,
+        // Fork setup never runs automatic deployments against a frozen boundary.
+        // Tests install/deploy inside the fork after choosing its boundary.
+        true,
         Some(suite),
         &generated,
     )?;
