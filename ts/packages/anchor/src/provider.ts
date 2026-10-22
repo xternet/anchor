@@ -7,7 +7,6 @@ import {
   ConfirmOptions,
   SimulatedTransactionResponse,
   Commitment,
-  SendTransactionError,
   SendOptions,
   VersionedTransaction,
   RpcResponseAndContext,
@@ -18,6 +17,7 @@ import {
 import { bs58 } from "./utils/bytes/index.js";
 import { isBrowser, isVersionedTransaction } from "./utils/common.js";
 import {
+  sendTransactionError,
   simulateTransaction,
   SuccessfulTxSimulationResponse,
 } from "./utils/rpc.js";
@@ -193,7 +193,9 @@ export class AnchorProvider implements Provider {
           throw err;
         } else {
           const logs = failedTx.meta?.logMessages;
-          throw !logs ? err : new SendTransactionError(err.message, logs);
+          throw !logs
+            ? err
+            : sendTransactionError("send", err.message, logs, txSig);
         }
       } else {
         throw err;
@@ -291,7 +293,9 @@ export class AnchorProvider implements Provider {
             throw err;
           } else {
             const logs = failedTx.meta?.logMessages;
-            throw !logs ? err : new SendTransactionError(err.message, logs);
+            throw !logs
+              ? err
+              : sendTransactionError("send", err.message, logs, txSig);
           }
         } else {
           throw err;
@@ -416,8 +420,9 @@ async function sendAndConfirmRawTransaction(
 
   const startTime = Date.now();
   while (Date.now() - startTime < 60_000) {
+    let signature: TransactionSignature | undefined;
     try {
-      const signature = await connection.sendRawTransaction(
+      signature = await connection.sendRawTransaction(
         rawTransaction,
         sendOptions
       );
@@ -458,6 +463,45 @@ async function sendAndConfirmRawTransaction(
     } catch (err) {
       if (err.name === "TimeoutError") {
         continue;
+      }
+      // @solana/web3.js can reject with the bare `TransactionError` when it
+      // reads an already failed status before its subscription fires. Recover
+      // logs only when the signature's status proves that exact failure.
+      // Otherwise preserve the original rejection. If the status read fails,
+      // log that failure without exposing the configured RPC endpoint.
+      const bare =
+        typeof err === "string" ||
+        (err !== null && typeof err === "object" && !(err instanceof Error));
+      if (signature !== undefined && bare) {
+        const { value } = await connection
+          .getSignatureStatus(signature)
+          .catch((statusError) => {
+            // Transport clients encode URLs differently. Remove URL tokens,
+            // not just one serialized spelling of the configured endpoint.
+            const redactEndpoint = (message: string) =>
+              message
+                .split(connection.rpcEndpoint)
+                .join("<RPC endpoint>")
+                .replace(/(?:https?|wss?):\/\/\S+/gi, "<RPC endpoint>");
+            console.error(
+              redactEndpoint(
+                `Raw transaction ${signature}: could not read its status after a bare confirmation rejection (${JSON.stringify(
+                  { err }
+                )})`
+              ),
+              redactEndpoint(
+                statusError instanceof Error && statusError.stack
+                  ? statusError.stack
+                  : String(statusError)
+              )
+            );
+            throw err;
+          });
+        if (value?.err && JSON.stringify(value.err) === JSON.stringify(err)) {
+          throw new ConfirmError(
+            `Raw transaction ${signature} failed (${JSON.stringify({ err })})`
+          );
+        }
       }
       throw err;
     }

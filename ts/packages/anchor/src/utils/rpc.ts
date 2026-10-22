@@ -150,6 +150,24 @@ async function getMultipleAccountsAndContextCore(
   return accounts;
 }
 
+/**
+ * Builds a `SendTransactionError` for either @solana/web3.js constructor ABI: the older
+ * positional `(message, logs)` one or the newer single object
+ * `{ action, signature, transactionMessage, logs }`. Both expose the logs as `logs`, which
+ * error translation reads.
+ */
+export function sendTransactionError(
+  action: "send" | "simulate",
+  message: string,
+  logs?: string[],
+  signature = ""
+): SendTransactionError {
+  const Constructor = SendTransactionError as any;
+  return Constructor.length >= 2
+    ? new Constructor(message, logs)
+    : new Constructor({ action, signature, transactionMessage: message, logs });
+}
+
 // copy from @solana/web3.js that has a commitment param
 export async function simulateTransaction(
   connection: Connection,
@@ -202,7 +220,8 @@ export async function simulateTransaction(
         console.error(res.error.message, logTrace);
       }
     }
-    throw new SendTransactionError(
+    throw sendTransactionError(
+      "simulate",
       "failed to simulate transaction: " + res.error.message,
       logs
     );

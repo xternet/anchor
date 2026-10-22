@@ -1,0 +1,28 @@
+import type { AnchorProvider, web3 } from "@anchor-lang/core";
+
+export declare class HistoricalForkError extends Error {
+  readonly code: string;
+}
+
+export declare class HistoricalFork {
+  /** Starts a historical Surfpool fork after a transaction signature or slot chosen in test code. */
+  static start(options: { after: string; dataDir?: string; startupTimeoutMs?: number }): Promise<HistoricalFork>;
+  readonly url: string;
+  readonly wsUrl: string;
+  readonly surfnetId: string;
+  readonly after: string;
+  readonly pid: number;
+  readonly directory: string;
+  /** An Anchor provider for this fork; defaults to the workspace wallet. */
+  provider(keypair?: web3.Keypair, options?: web3.ConfirmOptions): AnchorProvider;
+  /** An RPC call to this verified fork, including Surfpool's explicit `surfnet_*` controls. */
+  rpc(method: string, params?: unknown[]): Promise<any>;
+  /** Defines an account in this fork only. */
+  setAccount(pubkey: web3.PublicKey | string, account?: { lamports?: number; owner?: web3.PublicKey | string; data?: Uint8Array; executable?: boolean }): Promise<unknown>;
+  /** Fast ELF setup through Surfpool's program-writing helper; not a loader deployment. */
+  installProgram(programId: web3.PublicKey | string, soPath: string, authority?: web3.PublicKey): Promise<void>;
+  /** Explicit local slots; the historical clock never advances on its own. */
+  advance(slots?: number): Promise<unknown>;
+  /** Stops this fork's own child process. */
+  close(): Promise<void>;
+}

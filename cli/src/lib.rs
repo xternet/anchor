@@ -73,6 +73,8 @@ pub mod debugger;
 pub mod fetch;
 #[cfg(not(windows))]
 mod flamegraph;
+mod historical;
+mod historical_templates;
 mod keygen;
 mod legacy_idl;
 mod metadata;
@@ -271,6 +273,10 @@ pub enum Command {
         /// Test template to use
         #[clap(value_enum, long, default_value = "litesvm")]
         test_template: TestTemplate,
+        /// Generate historical SVM Replay setup for Mocha, Jest or RPC-based
+        /// Rust tests.
+        #[clap(long)]
+        historical: bool,
         /// Initialize even if there are files
         #[clap(long, action)]
         force: bool,
@@ -877,6 +883,7 @@ pub enum ProgramCommand {
         bypass_warning: bool,
     },
     /// Extend the length of an upgradeable program
+    #[clap(allow_missing_positional = true)]
     Extend {
         /// Program id to extend.
         /// If not provided, discovers program from workspace using program_name
@@ -1504,6 +1511,7 @@ fn process_command(opts: Opts) -> Result<()> {
             template,
             anchor_version,
             test_template,
+            historical,
             force,
             install_agent_skills,
             no_security_metadata,
@@ -1517,6 +1525,7 @@ fn process_command(opts: Opts) -> Result<()> {
             template,
             anchor_version,
             test_template,
+            historical,
             force,
             install_agent_skills,
             no_security_metadata,
@@ -1778,10 +1787,14 @@ fn init(
     template: ProgramTemplate,
     anchor_version: AnchorVersion,
     test_template: TestTemplate,
+    historical: bool,
     force: bool,
     install_agent_skills: bool,
     no_security_metadata: bool,
 ) -> Result<()> {
+    if historical {
+        historical_templates::validate(&test_template)?;
+    }
     if !force {
         if Config::discover(cfg_override)?.is_some() {
             return Err(anyhow!("Workspace already initialized"));
@@ -1818,6 +1831,12 @@ fn init(
     fs::create_dir_all("app")?;
 
     let mut cfg = Config::default();
+    if historical {
+        cfg.historical = Some(toml::from_str(
+            "provider = 'alchemy'\n[providers.alchemy]\nadapter = 'alchemy'\nkey_env = \
+             'API_ALCHEMY'\n",
+        )?);
+    }
 
     let uses_node = test_template.uses_node();
     let package_manager = if uses_node {
@@ -1919,6 +1938,9 @@ fn init(
         &program_id.to_string(),
         anchor_version,
     )?;
+    if historical {
+        historical_templates::write(&project_name, javascript, &test_template, anchor_version)?;
+    }
 
     if !no_install && uses_node {
         let package_manager_cmd =
@@ -4430,6 +4452,7 @@ fn test(
             cli_skip_local_validator,
             config_skip_local_validator,
         );
+        historical::guard_predeploy(cfg, validator_plan.predeploy)?;
         if validator_plan.predeploy {
             deploy(cfg_override, None, None, false, true, false, vec![])?;
         }
@@ -4927,8 +4950,17 @@ fn run_test_suite(
     surfpool_config: &Option<SurfpoolConfig>,
 ) -> Result<()> {
     println!("\nRunning test suite: {:#?}\n", test_suite_path.as_ref());
+    let historical_plan = historical::prepare_suite(
+        cfg,
+        test_suite_path.as_ref(),
+        test_validator,
+        surfpool_config,
+        validator_type,
+        skip_deploy,
+        detach,
+    )?;
     let mut validator_handle = None;
-    if is_localnet && !skip_local_validator {
+    if historical_plan.is_none() && is_localnet && !skip_local_validator {
         let generated_accounts = generated_validator_accounts(cfg, test_validator)?;
         match validator_type {
             ValidatorType::Surfpool => {
@@ -4982,7 +5014,7 @@ fn run_test_suite(
         .join(" ");
 
     // Setup log reader - kept alive until end of scope
-    let log_streams = if stream_program_logs {
+    let log_streams = if stream_program_logs && historical_plan.is_none() {
         match stream_logs(cfg, &url) {
             Ok(streams) => Some(streams),
             Err(e) => {
@@ -5006,9 +5038,24 @@ fn run_test_suite(
         std::process::Command::new("bash")
             .arg("-c")
             .arg(script_args)
-            .env("ANCHOR_PROVIDER_URL", url)
+            // A historical suite has no suite-wide endpoint: each test starts
+            // its own fork.
+            .env_remove("ANCHOR_PROVIDER_URL")
+            .envs(
+                historical_plan
+                    .is_none()
+                    .then_some(("ANCHOR_PROVIDER_URL", url)),
+            )
             .env("ANCHOR_WALLET", cfg.provider.wallet.to_string())
             .env("NODE_OPTIONS", node_options)
+            // Only this suite's own plan, never one inherited from a parent
+            // environment.
+            .env_remove(historical::PLAN_ENV)
+            .envs(
+                historical_plan
+                    .as_ref()
+                    .map(|plan| (historical::PLAN_ENV, plan.path.as_os_str())),
+            )
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .output()
@@ -5043,6 +5090,10 @@ fn run_test_suite(
             println!("Failed to kill subprocess {}: {}", child.id(), err);
         }
     }
+    let reaped = historical::reap(historical_plan.as_ref());
+    if let Err(err) = &reaped {
+        eprintln!("{err:#}");
+    }
 
     // Explicitly shutdown log streams - closes WebSocket subscriptions
     if let Some(log_streams) = log_streams {
@@ -5064,7 +5115,7 @@ fn run_test_suite(
         }
     }
 
-    Ok(())
+    reaped
 }
 
 // Returns the solana-test-validator flags. When `skip_deploy` is false, this
@@ -5818,6 +5869,10 @@ fn surfpool_flags(
         flags.push("--max-profiles".to_string());
         flags.push("1".to_string());
         flags.push("--no-studio".to_string());
+    }
+
+    if let Some(extra_args) = surfpool_config.as_ref().and_then(|c| c.extra_args.as_ref()) {
+        flags.extend(extra_args.iter().cloned());
     }
 
     match skip_deploy {
@@ -7692,6 +7747,39 @@ mod tests {
     }
 
     #[test]
+    fn test_program_extend_accepts_explicit_id_or_workspace_program() {
+        for args in [
+            vec![
+                "anchor",
+                "program",
+                "extend",
+                "11111111111111111111111111111111",
+                "1024",
+            ],
+            vec![
+                "anchor",
+                "program",
+                "extend",
+                "--program-name",
+                "demo",
+                "1024",
+            ],
+        ] {
+            let opts = Opts::try_parse_from(args).unwrap();
+            let Command::Program {
+                subcmd:
+                    ProgramCommand::Extend {
+                        additional_bytes, ..
+                    },
+            } = opts.command
+            else {
+                panic!("expected program extend");
+            };
+            assert_eq!(additional_bytes, 1024);
+        }
+    }
+
+    #[test]
     fn test_new_accepts_anchor_version() {
         let opts =
             Opts::try_parse_from(["anchor", "new", "example", "--anchor-version", "v2"]).unwrap();
@@ -7880,6 +7968,7 @@ mod tests {
             ProgramTemplate::default(),
             AnchorVersion::default(),
             TestTemplate::default(),
+            false,
             true,
             true,
             true,
@@ -7904,6 +7993,7 @@ mod tests {
             ProgramTemplate::default(),
             AnchorVersion::default(),
             TestTemplate::default(),
+            false,
             true,
             true,
             true,
@@ -7928,6 +8018,7 @@ mod tests {
             ProgramTemplate::default(),
             AnchorVersion::default(),
             TestTemplate::default(),
+            false,
             true,
             true,
             true,
@@ -8041,6 +8132,111 @@ mod tests {
                 predeploy: true,
                 stream_program_logs: true,
             }
+        );
+    }
+
+    #[test]
+    fn surfpool_flags_emits_extra_args() {
+        let workspace = tempdir().unwrap();
+        let cfg = WithPath::new(Config::default(), workspace.path().join("Anchor.toml"));
+        let expected = vec![
+            "--match-datasource".to_string(),
+            "--disable-feature".to_string(),
+            "ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP".to_string(),
+        ];
+        let surfpool_config = Some(SurfpoolConfig {
+            extra_args: Some(expected.clone()),
+            ..Default::default()
+        });
+
+        let flags = surfpool_flags(&cfg, &surfpool_config, false, true, None, &[]).unwrap();
+
+        assert!(flags
+            .windows(expected.len())
+            .any(|args| args == expected.as_slice()));
+    }
+
+    #[test]
+    fn surfpool_flags_normal_arguments_are_exactly_unchanged() {
+        let workspace = tempdir().unwrap();
+        let cfg = WithPath::new(Config::default(), workspace.path().join("Anchor.toml"));
+        let strings = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            surfpool_flags(&cfg, &None, false, false, None, &[]).unwrap(),
+            strings(&[
+                "--offline",
+                "--block-production-mode",
+                "transaction",
+                "--log-level",
+                "none",
+                "--no-tui",
+                "--disable-instruction-profiling",
+                "--max-profiles",
+                "1",
+                "--no-studio",
+                "--legacy-anchor-compatibility",
+            ])
+        );
+        let surfpool_config = Some(SurfpoolConfig::from(crate::config::_SurfpoolConfig {
+            airdrop_addresses: Some(strings(&["Air1", "Air2"])),
+            ws_port: Some(9900),
+            manifest_file_path: Some("./txtx.yml".into()),
+            runbooks: Some(strings(&["deployment"])),
+            slot_time: Some(50),
+            log_level: Some("info".into()),
+            block_production_mode: Some("clock".into()),
+            extra_args: Some(strings(&["--studio-port", "18488"])),
+            ..Default::default()
+        }));
+        let suite = workspace.path().join("tests");
+        assert_eq!(
+            surfpool_flags(&cfg, &surfpool_config, false, false, Some(&suite), &[]).unwrap(),
+            strings(&[
+                "--airdrop",
+                "Air1",
+                "--airdrop",
+                "Air2",
+                "--host",
+                SURFPOOL_HOST,
+                "--port",
+                "8899",
+                "--ws-port",
+                "9900",
+                "--manifest-file-path",
+                "./txtx.yml",
+                "--runbook",
+                "deployment",
+                "--slot-time",
+                "50",
+                "--offline",
+                "--block-production-mode",
+                "clock",
+                "--log-level",
+                "info",
+                "--no-tui",
+                "--disable-instruction-profiling",
+                "--max-profiles",
+                "1",
+                "--no-studio",
+                "--studio-port",
+                "18488",
+                "--legacy-anchor-compatibility",
+                "--anchor-test-config-path",
+                &suite.display().to_string(),
+            ])
+        );
+        assert_eq!(
+            surfpool_flags(&cfg, &surfpool_config, true, true, None, &[]).unwrap()[16..],
+            strings(&[
+                "--offline",
+                "--block-production-mode",
+                "clock",
+                "--log-level",
+                "info",
+                "--studio-port",
+                "18488",
+                "--no-deploy"
+            ])
         );
     }
 

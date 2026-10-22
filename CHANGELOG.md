@@ -20,9 +20,14 @@ The minor version will be incremented upon a breaking change and the patch versi
 - lang: Allow `None` in `mint::authority` and `mint::freeze_authority` constraints ([#5007](https://github.com/otter-sec/anchor/pull/5007)).
 - lang: Implement `Space` for `NonZero*` integers so `#[derive(InitSpace)]` supports them ([#5132](https://github.com/otter-sec/anchor/pull/5132)).
 - idl: Support `NonZero*` integer types in IDL generation ([#5130](https://github.com/otter-sec/anchor/pull/5130)).
+- cli: Add `extra_args` to `[surfpool]` in `Anchor.toml` to pass additional flags to `surfpool start`.
+- cli: Add opt-in historical RPC suites and Mocha, Jest and Rust scaffolds with per-test Surfpool forks.
 
 ### Fixes
 
+- cli: Honor the signature limit when fetching historical IDL updates.
+- cli: Accept an explicit program id or workspace program when parsing `program extend`.
+- ts: Preserve landed transaction errors across supported web3.js versions without resending them.
 - Block mutable aliasing between accounts marked `zero` and `init` ([#4871](https://github.com/otter-sec/anchor/pull/4871)).
 - lang: Support fully qualified account types in `Context` ([#4836](https://github.com/otter-sec/anchor/pull/4836)).
 - ts: Support `delegatedAmount` in accounts resolver ([#4957](https://github.com/otter-sec/anchor/pull/4957)).
