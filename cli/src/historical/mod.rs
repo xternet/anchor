@@ -6,6 +6,8 @@ mod plan;
 #[cfg(test)]
 mod tests;
 
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use {
     crate::config::{Config, SurfpoolConfig, TestValidator, ValidatorType, WithPath},
     anchor_client::Cluster,
@@ -110,7 +112,10 @@ pub(crate) fn prepare_suite(
     let suite = suite.canonicalize()?;
     let directory = owned_directory(&root.join(".anchor").join("historical"))?;
     let registry = directory.join("forks");
-    fs::create_dir(&registry)?;
+    let mut registry_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    registry_builder.mode(0o700);
+    registry_builder.create(&registry)?;
     let shutdown_wait = surfpool_config
         .as_ref()
         .map(|config| config.shutdown_wait)
@@ -129,7 +134,14 @@ pub(crate) fn prepare_suite(
         shutdown_wait,
     })?;
     let path = directory.join("plan.json");
-    fs::write(&path, serde_json::to_string_pretty(&plan)? + "\n")?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    use std::io::Write;
+    options
+        .open(&path)?
+        .write_all((serde_json::to_string_pretty(&plan)? + "\n").as_bytes())?;
     Ok(Some(SuitePlan {
         path,
         registry,
@@ -150,7 +162,11 @@ fn owned_directory(parent: &Path) -> Result<PathBuf> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::create_dir(&directory)
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder
+        .create(&directory)
         .with_context(|| format!("create historical suite directory {}", directory.display()))?;
     Ok(directory)
 }

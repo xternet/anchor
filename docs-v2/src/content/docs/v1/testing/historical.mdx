@@ -71,6 +71,12 @@ Use an SBPF format supported by the boundary runtime (`v0` for this example).
 Use `try/finally` or test teardown to close each fork. Anchor also reaps recorded
 forks left by a crashed test process. No operation is sent to mainnet.
 
+`provider()` uses one disposable signing key per fork, not the workspace wallet;
+fund it explicitly with `setAccount`. Rust templates also use fresh keys. Never
+pass a real funded wallet at a recent boundary: historical blockhashes are real,
+so leaked signed transaction bytes may remain valid on mainnet until they expire.
+Suite/fork identity directories and files are private (0700/0600 on Unix).
+
 ## Fixtures and limits
 
 Every fork loads `fund_accounts`, `mints`, `token_accounts`,

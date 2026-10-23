@@ -79,6 +79,13 @@ Build for a program format the boundary's runtime supports (`v0` for the default
 Each test chooses its boundary in code (`after: "413023260"`, a slot or a transaction
 signature). The fork's clock is frozen: it moves only when a test calls `advance()`.
 
+The Node helper uses one disposable signing key per fork by default; it never loads the
+workspace wallet automatically. Fund it with `setAccount`. Rust templates also use a fresh
+key. Do not deliberately supply a real funded wallet: a recent boundary preserves mainnet
+blockhashes, so leaked signed transaction bytes may still be broadcast on mainnet before
+expiry. The fork itself never broadcasts. Suite/fork identity files are private to your OS
+user (0700 directories, 0600 files).
+
 The test funds its wallet and installs this build of the program with Surfpool's fast
 program-writing helper (`installProgram`), which is not a loader deployment. Accounts the test
 creates are declared first (`setAccount`). Remove event and account listeners before `close()`. These are local, hypothetical changes, never sent to

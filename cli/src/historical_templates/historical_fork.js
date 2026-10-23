@@ -77,7 +77,8 @@ class HistoricalFork {
     const host = launch.surfpool.host;
     const surfnetId = `anchor-${process.pid}-${randomBytes(8).toString("hex")}`;
     const directory = join(launch.registry, "..", "forks-data", surfnetId);
-    mkdirSync(directory, { recursive: true });
+    mkdirSync(join(directory, ".."), { recursive: true, mode: 0o700 });
+    mkdirSync(directory, { mode: 0o700 });
     // A private image only this fork's own launch arguments install: readiness
     // proves that the
     // answering server is this child, never a stale listener on a reused port.
@@ -87,7 +88,7 @@ class HistoricalFork {
       data: randomBytes(16).toString("base64"),
     };
     const sentinelFile = join(directory, "sentinel.snapshot.json");
-    writeFileSync(sentinelFile, `{"${sentinel.pubkey}":{"lamports":${sentinel.lamports},"owner":"${SYSTEM_PROGRAM}","executable":false,"rentEpoch":18446744073709551615,"data":"${sentinel.data}","parsedData":null}}\n`);
+    writeFileSync(sentinelFile, `{"${sentinel.pubkey}":{"lamports":${sentinel.lamports},"owner":"${SYSTEM_PROGRAM}","executable":false,"rentEpoch":18446744073709551615,"data":"${sentinel.data}","parsedData":null}}\n`, { flag: "wx", mode: 0o600 });
     const port = await freePortPair(host);
     // Surfpool always serves its Studio/scenario HTTP endpoint, even with
     // --no-studio: give each
@@ -100,7 +101,7 @@ class HistoricalFork {
       "--snapshot", sentinelFile];
     if (dataDir) args.push("--historical-data-dir", dataDir);
     const logPath = join(directory, "surfpool.log");
-    const log = openSync(logPath, "a");
+    const log = openSync(logPath, "ax", 0o600);
     const child = spawn(launch.surfpool.program, args, { cwd: launch.surfpool.cwd, stdio: ["ignore", log, log] });
     closeSync(log);
     const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
@@ -114,7 +115,7 @@ class HistoricalFork {
     }
     const record = join(launch.registry, `${surfnetId}.json`);
     try {
-      writeFileSync(record, JSON.stringify({ pid: child.pid, surfnetId, port, studioPort, after }) + "\n");
+      writeFileSync(record, JSON.stringify({ pid: child.pid, surfnetId, port, studioPort, after }) + "\n", { flag: "wx", mode: 0o600 });
     } catch (error) {
       child.kill("SIGKILL");
       await exited;
@@ -131,6 +132,7 @@ class HistoricalFork {
   }
 
   #launch; #child; #exited; #record; #logPath; #verified = false; #closed = false; #connections = [];
+  #signer = anchor.web3.Keypair.generate();
 
   constructor({ launch, child, exited, record, directory, host, port, surfnetId, after, logPath }) {
     this.#launch = launch;
@@ -251,11 +253,13 @@ class HistoricalFork {
   }
 
   /**
-   * An Anchor provider for this fork; `keypair` defaults to the workspace wallet.
+   * An Anchor provider for this fork; defaults to one disposable key per fork.
+   * Fund it explicitly with setAccount. With a real funded key at a recent
+   * boundary, leaked signed bytes may still be valid on mainnet.
    */
   provider(keypair, options = { commitment: "processed", preflightCommitment: "processed" }) {
     if (!this.#verified || this.#closed) throw new HistoricalForkError("NOT_READY", "this fork is not running");
-    const signer = keypair ?? anchor.web3.Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(this.#launch.wallet, "utf8"))));
+    const signer = keypair ?? this.#signer;
     const connection = new anchor.web3.Connection(this.url, { commitment: options.commitment, wsEndpoint: this.wsUrl });
     this.#connections.push(connection);
     return new anchor.AnchorProvider(connection, new anchor.Wallet(signer), options);
@@ -281,7 +285,7 @@ class HistoricalFork {
     const [programData] = anchor.web3.PublicKey.findProgramAddressSync([id.toBuffer()], loader);
     await this.setAccount(id);
     await this.setAccount(programData);
-    const upgradeAuthority = (authority ?? this.provider().wallet.publicKey).toString();
+    const upgradeAuthority = (authority ?? this.#signer.publicKey).toString();
     for (let offset = 0; offset < elf.length; offset += 4096) {
       await this.rpc("surfnet_writeProgram", [id.toBase58(), elf.subarray(offset, offset + 4096).toString("hex"), offset, upgradeAuthority]);
     }
@@ -304,10 +308,16 @@ class HistoricalFork {
   async close() {
     if (this.#closed) return;
     this.#closed = true;
+    const failures = [];
     for (const connection of this.#connections) {
       const socket = connection._rpcWebSocket;
-      socket?.setAutoReconnect?.(false);
-      socket?.close?.();
+      try {
+        socket?.setAutoReconnect?.(false);
+        // Older rpc-websockets cannot close before its first connection.
+        if (socket?.socket) socket.close();
+      } catch (error) {
+        failures.push(error);
+      }
     }
     if (this.#child.exitCode === null && this.#child.signalCode === null) {
       this.#child.kill("SIGTERM");
@@ -323,6 +333,7 @@ class HistoricalFork {
       }
     }
     rmSync(this.#record, { force: true });
+    if (failures.length) throw new AggregateError(failures, "fork stopped, but RPC connection cleanup failed");
   }
 }
 

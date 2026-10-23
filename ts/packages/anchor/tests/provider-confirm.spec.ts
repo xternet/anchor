@@ -10,10 +10,10 @@ import { AnchorProvider, Wallet } from "../src";
 import { inspect } from "util";
 import { format, parse } from "url";
 
-// @solana/web3.js can reject `confirmTransaction` with the bare `TransactionError` it read from
-// an already failed status. `sendAndConfirm` must then recover the logs like any failed
-// confirmation, but only when the signature's status proves that failure; any other rejection
-// stays untouched, and nothing is resent.
+// @solana/web3.js can reject `confirmTransaction` with a bare `TransactionError`
+// read from an already failed status. `sendAndConfirm` must recover the logs
+// like any failed confirmation, but only when the signature's status proves
+// that failure. Any other rejection stays untouched, and nothing is resent.
 
 const BLOCKHASH = "GfVcyD5tT6Aua4yzGiVy5gM2y2qXmZRr5GnMaCu2FQVc";
 const CUSTOM_6000 = { InstructionError: [0, { Custom: 6000 }] };
@@ -80,6 +80,87 @@ function fixture(
 }
 
 describe("sendAndConfirm with a bare TransactionError rejection", () => {
+  it.each([
+    "https:\\/\\/provider.invalid\\/v2\\/not-a-real-api-key",
+    "/v2/not-a-real-api-key",
+    "Invalid API key: not-a-real-api-key",
+    "getaddrinfo ENOTFOUND not-a-real-api-key.provider.invalid",
+  ])("omits arbitrary transport diagnostics: %s", async (detail) => {
+    const rejection = { reason: detail };
+    const { provider, tx, calls } = fixture(rejection, null, new Error(detail));
+    const logged = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(provider.sendAndConfirm(tx)).rejects.toBe(rejection);
+      expect(calls).toEqual({ send: 1, status: 1, transaction: 0 });
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged.mock.calls[0]).toEqual([
+        "RPC_STATUS_UNAVAILABLE: could not read transaction status after a confirmation rejection; original error preserved.",
+      ]);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+  it.each(
+    [
+      "https://not-a-real-api-key.provider.invalid/",
+      "https://NOT-A-REAL-API-KEY.provider.invalid/",
+      "https://not-a-real-api-key.bücher.invalid/",
+    ].flatMap((endpoint) =>
+      [false, true].map((bareHost) => [endpoint, bareHost] as [string, boolean])
+    )
+  )(
+    "redacts a credential-bearing DNS hostname %s (bare rejection: %s)",
+    async (endpoint, bareHost) => {
+      const hostname = new URL(endpoint).hostname;
+      const rejection = bareHost
+        ? `getaddrinfo ENOTFOUND ${hostname.toUpperCase()}`
+        : CUSTOM_6000;
+      const { provider, tx, calls } = fixture(
+        rejection,
+        null,
+        new Error(
+          `request to ${endpoint} failed, reason: getaddrinfo ENOTFOUND ${hostname}`
+        ),
+        endpoint
+      );
+      const logged = jest.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(provider.sendAndConfirm(tx)).rejects.toBe(rejection);
+        expect(calls).toEqual({ send: 1, status: 1, transaction: 0 });
+        expect(logged).toHaveBeenCalledTimes(1);
+        const diagnostic = inspect(logged.mock.calls);
+        expect(diagnostic).toContain("RPC_STATUS_UNAVAILABLE");
+        expect(diagnostic.toLowerCase()).not.toContain("not-a-real-api-key");
+        expect(diagnostic.toLowerCase()).not.toContain(hostname.toLowerCase());
+      } finally {
+        logged.mockRestore();
+      }
+    }
+  );
+
+  it.each(["not a URL", "file:///not-a-real-api-key"])(
+    "keeps the rejection and omits transport details for invalid endpoint %s",
+    async (endpoint) => {
+      const { provider, tx, calls } = fixture(
+        CUSTOM_6000,
+        null,
+        new Error("getaddrinfo ENOTFOUND not-a-real-api-key.provider.invalid"),
+        endpoint
+      );
+      const logged = jest.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(provider.sendAndConfirm(tx)).rejects.toBe(CUSTOM_6000);
+        expect(calls).toEqual({ send: 1, status: 1, transaction: 0 });
+        expect(logged).toHaveBeenCalledTimes(1);
+        const diagnostic = inspect(logged.mock.calls);
+        expect(diagnostic).toContain("RPC_STATUS_UNAVAILABLE");
+        expect(diagnostic).not.toContain("not-a-real-api-key");
+      } finally {
+        logged.mockRestore();
+      }
+    }
+  );
+
   it.each(
     [
       "http://dummyuser:not-a-real-api-key$PASS@127.0.0.1:1/",
@@ -111,8 +192,7 @@ describe("sendAndConfirm with a bare TransactionError rejection", () => {
         await expect(provider.sendAndConfirm(tx)).rejects.toBe(rejection);
         expect(calls).toEqual({ send: 1, status: 1, transaction: 0 });
         const diagnostic = inspect(logged.mock.calls);
-        expect(diagnostic).toContain("ECONNREFUSED");
-        expect(diagnostic).toContain("<RPC endpoint>");
+        expect(diagnostic).toContain("RPC_STATUS_UNAVAILABLE");
         expect(diagnostic).not.toContain("not-a-real-api-key");
       } finally {
         logged.mockRestore();
@@ -149,7 +229,7 @@ describe("sendAndConfirm with a bare TransactionError rejection", () => {
         expect(calls).toEqual({ send: 1, status: 1, transaction: 0 });
         expect(logged).toHaveBeenCalledTimes(1);
         const diagnostic = inspect(logged.mock.calls);
-        expect(diagnostic).toContain("<RPC endpoint>");
+        expect(diagnostic).toContain("RPC_STATUS_UNAVAILABLE");
         expect(diagnostic).not.toContain("not-a-real-api-key");
         expect(diagnostic).not.toContain("another-fake-key");
       } finally {
@@ -178,8 +258,7 @@ describe("sendAndConfirm with a bare TransactionError rejection", () => {
         expect(calls).toEqual({ send: 1, status: 1, transaction: 0 });
         expect(logged).toHaveBeenCalledTimes(1);
         const diagnostic = inspect(logged.mock.calls);
-        expect(diagnostic).toContain("request to");
-        expect(diagnostic).toContain("<RPC endpoint>");
+        expect(diagnostic).toContain("RPC_STATUS_UNAVAILABLE");
         expect(diagnostic).not.toContain("not-a-real-api-key");
       } finally {
         logged.mockRestore();
@@ -208,7 +287,8 @@ describe("sendAndConfirm with a bare TransactionError rejection", () => {
       await expect(provider.sendAndConfirm(tx)).rejects.toBe(CUSTOM_6000);
       expect(calls).toEqual({ send: 1, status: 1, transaction: 0 });
       expect(logged).toHaveBeenCalledTimes(1);
-      expect(inspect(logged.mock.calls[0])).toContain("socket hang up");
+      expect(inspect(logged.mock.calls[0])).toContain("RPC_STATUS_UNAVAILABLE");
+      expect(inspect(logged.mock.calls[0])).not.toContain("socket hang up");
     } finally {
       logged.mockRestore();
     }

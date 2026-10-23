@@ -475,25 +475,11 @@ async function sendAndConfirmRawTransaction(
       if (signature !== undefined && bare) {
         const { value } = await connection
           .getSignatureStatus(signature)
-          .catch((statusError) => {
-            // Transport clients encode URLs differently. Remove URL tokens,
-            // not just one serialized spelling of the configured endpoint.
-            const redactEndpoint = (message: string) =>
-              message
-                .split(connection.rpcEndpoint)
-                .join("<RPC endpoint>")
-                .replace(/(?:https?|wss?):\/\/\S+/gi, "<RPC endpoint>");
+          .catch(() => {
+            // Remote errors and even signature text can contain credentials.
+            // Report the failure without logging arbitrary transport content.
             console.error(
-              redactEndpoint(
-                `Raw transaction ${signature}: could not read its status after a bare confirmation rejection (${JSON.stringify(
-                  { err }
-                )})`
-              ),
-              redactEndpoint(
-                statusError instanceof Error && statusError.stack
-                  ? statusError.stack
-                  : String(statusError)
-              )
+              "RPC_STATUS_UNAVAILABLE: could not read transaction status after a confirmation rejection; original error preserved."
             );
             throw err;
           });

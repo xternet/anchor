@@ -13,7 +13,7 @@ export declare class HistoricalFork {
   readonly after: string;
   readonly pid: number;
   readonly directory: string;
-  /** An Anchor provider for this fork; defaults to the workspace wallet. */
+  /** Uses one disposable key per fork; fund it explicitly with setAccount. Never supply a real funded wallet at a recent boundary. */
   provider(keypair?: web3.Keypair, options?: web3.ConfirmOptions): AnchorProvider;
   /** An RPC call to this verified fork, including Surfpool's explicit `surfnet_*` controls. */
   rpc(method: string, params?: unknown[]): Promise<any>;

@@ -1,6 +1,25 @@
 use {super::*, clap::Parser};
 
 #[test]
+fn historical_helpers_use_private_files_and_disposable_default_signers() {
+    let node = include_str!("historical_fork.js");
+    let rust = include_str!("historical_fork.rs.txt");
+    assert!(node.contains("#signer = anchor.web3.Keypair.generate()"));
+    assert!(node.contains("const signer = keypair ?? this.#signer"));
+    assert!(
+        !node.contains("fromSecretKey"),
+        "never load the workspace signing key implicitly"
+    );
+    assert!(node.contains("mode: 0o700"));
+    assert!(node.contains("mode: 0o600"));
+    assert!(node.contains("flag: \"wx\""));
+    assert!(rust.contains("options.mode(0o600)"));
+    assert!(rust.contains("builder.mode(0o700)"));
+    assert!(rust.contains("create_new(true)"));
+    assert!(GUIDE.contains("leaked signed transaction bytes"));
+}
+
+#[test]
 fn helpers_start_historical_surfpool_from_the_suite_plan_and_own_only_their_child() {
     let node = include_str!("historical_fork.js");
     let rust = include_str!("historical_fork.rs.txt");

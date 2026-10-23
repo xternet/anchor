@@ -14,12 +14,24 @@ use solana_signer::Signer;
 use std::{
     fmt,
     fs::{self, File},
+    io::Write,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+fn private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
 
 const PLAN_SCHEMA: &str = "anchor-historical-plan/v1";
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
@@ -136,7 +148,14 @@ impl HistoricalFork {
         let plan = Plan::load()?;
         let surfnet_id = format!("anchor-{}-{}", std::process::id(), &random_key()[..16]);
         let directory = plan.registry.join("..").join("forks-data").join(&surfnet_id);
-        fs::create_dir_all(&directory).map_err(|e| error("RECORD", format!("{}: {e}", directory.display())))?;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder.create(directory.parent().expect("fork directory has a parent"))
+            .map_err(|e| error("RECORD", e.to_string()))?;
+        builder.recursive(false);
+        builder.create(&directory).map_err(|e| error("RECORD", format!("{}: {e}", directory.display())))?;
         // A private image only this fork's own launch arguments install:
         // readiness proves that the
         // answering server is this child, never a stale listener on a reused
@@ -144,7 +163,7 @@ impl HistoricalFork {
         let sentinel = random_key();
         let lamports = 2_000_000 + u64::from(u16::from_le_bytes([sentinel.as_bytes()[0], sentinel.as_bytes()[1]]));
         let sentinel_file = directory.join("sentinel.snapshot.json");
-        fs::write(&sentinel_file, format!("{{\"{sentinel}\":{{\"lamports\":{lamports},\"owner\":\"{SYSTEM_PROGRAM}\",\"executable\":false,\"rentEpoch\":18446744073709551615,\"data\":\"\",\"parsedData\":null}}}}\n"))
+        private_file(&sentinel_file).and_then(|mut file| file.write_all(format!("{{\"{sentinel}\":{{\"lamports\":{lamports},\"owner\":\"{SYSTEM_PROGRAM}\",\"executable\":false,\"rentEpoch\":18446744073709551615,\"data\":\"\",\"parsedData\":null}}}}\n").as_bytes()))
             .map_err(|e| error("RECORD", e.to_string()))?;
         let host = plan.host.clone();
         let port = free_port_pair(&host)?;
@@ -162,7 +181,7 @@ impl HistoricalFork {
             args.extend(["--historical-data-dir".into(), dir.display().to_string()]);
         }
         let log = directory.join("surfpool.log");
-        let output = File::create(&log).map_err(|e| error("RECORD", e.to_string()))?;
+        let output = private_file(&log).map_err(|e| error("RECORD", e.to_string()))?;
         let errors = output.try_clone().map_err(|e| error("RECORD", e.to_string()))?;
         let mut child = Command::new(&plan.program)
             .args(&args)
@@ -174,7 +193,7 @@ impl HistoricalFork {
             .map_err(|e| error("SPAWN", format!("cannot start {}: {e}", plan.program)))?;
         let record = plan.registry.join(format!("{surfnet_id}.json"));
         let entry = json!({"pid": child.id(), "surfnetId": surfnet_id, "port": port, "studioPort": studio, "after": after});
-        if let Err(e) = fs::write(&record, entry.to_string() + "\n") {
+        if let Err(e) = private_file(&record).and_then(|mut file| file.write_all((entry.to_string() + "\n").as_bytes())) {
             let stopped = child.kill().and_then(|()| child.wait()).map(|_| "stopped".to_owned()).unwrap_or_else(|kill| format!("could not be stopped ({kill})"));
             return Err(error("RECORD", format!("cannot record fork {surfnet_id} for cleanup ({e}); its child {stopped}")));
         }

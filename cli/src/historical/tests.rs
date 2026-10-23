@@ -7,6 +7,18 @@ use {
     std::process::Stdio,
 };
 
+#[cfg(unix)]
+#[test]
+fn suite_identity_directory_is_private_even_with_a_permissive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let suite = owned_directory(root.path()).unwrap();
+    assert_eq!(
+        std::fs::metadata(suite).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
 fn surfpool(config: _SurfpoolConfig) -> Option<SurfpoolConfig> {
     Some(config.into())
 }
