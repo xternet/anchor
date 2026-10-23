@@ -83,8 +83,18 @@ The Node helper uses one disposable signing key per fork by default; it never lo
 workspace wallet automatically. Fund it with `setAccount`. Rust templates also use a fresh
 key. Do not deliberately supply a real funded wallet: a recent boundary preserves mainnet
 blockhashes, so leaked signed transaction bytes may still be broadcast on mainnet before
-expiry. The fork itself never broadcasts. Suite/fork identity files are private to your OS
+expiry. Durable-nonce transactions may remain valid until the on-chain nonce advances.
+The fork itself never broadcasts. Suite/fork identity files are private to your OS
 user (0700 directories, 0600 files).
+
+Helper RPC calls and Node providers' HTTP requests refuse after the owned child exits or
+the fork closes; Node provider WebSockets are closed with automatic reconnect disabled.
+New Node WebSocket connection attempts are refused with a diagnostic after exit, including
+subscriptions on a retained provider; registration may still return a subscription id,
+not a synchronous error. These process-lifetime checks and startup sentinel
+checks are not cryptographic endpoint authentication. Raw HTTP/WebSocket URLs and Rust
+`Cluster` values are connection details only: external clients do not inherit
+the helper's lifetime guards. Do not reuse these clients after the fork stops.
 
 The test funds its wallet and installs this build of the program with Surfpool's fast
 program-writing helper (`installProgram`), which is not a loader deployment. Accounts the test

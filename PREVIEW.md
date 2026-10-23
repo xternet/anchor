@@ -6,7 +6,10 @@ Anchor release. Proposed upstream PRs remain separate and unmerged.
 The current source adds credential-safe confirmation diagnostics, private fork
 identity files and one disposable default signing key per fork. Funding remains
 explicit. It also handles closing providers that never opened a WebSocket on
-older supported clients. Existing fixture support and normal testing remain.
+older supported clients. Helper RPCs and retained Node providers now refuse calls
+after their owned child exits, including WebSocket reconnect attempts; Rust helper
+RPCs check child liveness too. Raw endpoints and independently created clients
+do not inherit those guards. Existing fixture support and normal testing remain.
 Native Windows historical helpers remain unsupported; use WSL2.
 
 [Earlier snapshot downloads](https://github.com/xternet/anchor/releases/tag/svm-replay-0.2.0-preview.2)
@@ -17,6 +20,7 @@ Requires [SVM Replay 0.2.0](https://github.com/xternet/svm-replay/releases/tag/v
 and the matching unofficial Surfpool preview. Missing historical data fails
 explicitly; no silent current-state fallback is used.
 
-Never deliberately use a real funded wallet at a recent historical boundary:
-leaked signed bytes may remain valid on mainnet until their blockhash expires.
-The fork does not submit transactions to mainnet.
+Never deliberately use a real funded wallet: leaked signed bytes may remain valid
+on mainnet while their blockhash is valid. Durable-nonce signatures can remain
+valid until the on-chain nonce advances. Disposable defaults and lifecycle guards
+are not cryptographic domain separation. The fork does not submit to mainnet.

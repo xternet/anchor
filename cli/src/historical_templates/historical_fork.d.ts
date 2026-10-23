@@ -7,13 +7,17 @@ export declare class HistoricalForkError extends Error {
 export declare class HistoricalFork {
   /** Starts a historical Surfpool fork after a transaction signature or slot chosen in test code. */
   static start(options: { after: string; dataDir?: string; startupTimeoutMs?: number }): Promise<HistoricalFork>;
+  /** Raw endpoints; independently created clients do not inherit helper lifetime guards. */
   readonly url: string;
   readonly wsUrl: string;
   readonly surfnetId: string;
   readonly after: string;
   readonly pid: number;
   readonly directory: string;
-  /** Uses one disposable key per fork; fund it explicitly with setAccount. Never supply a real funded wallet at a recent boundary. */
+  /** Uses one disposable key per fork. HTTP calls refuse after child exit;
+   * WebSocket connection attempts are blocked with a diagnostic. Registration
+   * may still return a subscription id. Never supply a real funded wallet:
+   * durable-nonce transactions may remain valid until the on-chain nonce advances. */
   provider(keypair?: web3.Keypair, options?: web3.ConfirmOptions): AnchorProvider;
   /** An RPC call to this verified fork, including Surfpool's explicit `surfnet_*` controls. */
   rpc(method: string, params?: unknown[]): Promise<any>;

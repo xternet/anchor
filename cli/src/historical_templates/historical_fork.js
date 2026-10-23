@@ -79,9 +79,8 @@ class HistoricalFork {
     const directory = join(launch.registry, "..", "forks-data", surfnetId);
     mkdirSync(join(directory, ".."), { recursive: true, mode: 0o700 });
     mkdirSync(directory, { mode: 0o700 });
-    // A private image only this fork's own launch arguments install: readiness
-    // proves that the
-    // answering server is this child, never a stale listener on a reused port.
+    // A private image installed by this fork's launch arguments checks startup
+    // readiness, not transport authentication for subsequent requests.
     const sentinel = {
       pubkey: anchor.web3.Keypair.generate().publicKey.toBase58(),
       lamports: 2_000_000 + randomBytes(2).readUInt16LE(0),
@@ -132,6 +131,7 @@ class HistoricalFork {
   }
 
   #launch; #child; #exited; #record; #logPath; #verified = false; #closed = false; #connections = [];
+  #connectionFailures = [];
   #signer = anchor.web3.Keypair.generate();
 
   constructor({ launch, child, exited, record, directory, host, port, surfnetId, after, logPath }) {
@@ -146,9 +146,26 @@ class HistoricalFork {
     this.surfnetId = surfnetId;
     this.after = after;
     this.pid = child.pid;
+    child.once("exit", () => {
+      this.#verified = false;
+      this.#connectionFailures.push(...this.#stopConnections());
+    });
+  }
+
+  #assertRunning() {
+    if (this.#closed) throw new HistoricalForkError("NOT_READY", "this fork is closed");
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+      throw new HistoricalForkError("EXITED", "this fork's surfpool child has exited");
+    }
+  }
+
+  #assertReady() {
+    this.#assertRunning();
+    if (!this.#verified) throw new HistoricalForkError("NOT_READY", "this fork is not running");
   }
 
   async #call(method, params = []) {
+    this.#assertRunning();
     const response = await fetch(this.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -156,6 +173,7 @@ class HistoricalFork {
       signal: AbortSignal.timeout(30_000),
     });
     const value = await response.json();
+    this.#assertRunning();
     if (value.error) throw new HistoricalForkError("RPC", `${method}: ${JSON.stringify(value.error)}`);
     return value.result;
   }
@@ -248,7 +266,7 @@ class HistoricalFork {
    * An RPC call to this verified fork, including explicit `surfnet_*` controls.
    */
   async rpc(method, params = []) {
-    if (!this.#verified || this.#closed) throw new HistoricalForkError("NOT_READY", "this fork is not running");
+    this.#assertReady();
     return this.#call(method, params);
   }
 
@@ -256,11 +274,35 @@ class HistoricalFork {
    * An Anchor provider for this fork; defaults to one disposable key per fork.
    * Fund it explicitly with setAccount. With a real funded key at a recent
    * boundary, leaked signed bytes may still be valid on mainnet.
+   * A durable nonce can remain valid until its on-chain nonce advances.
    */
   provider(keypair, options = { commitment: "processed", preflightCommitment: "processed" }) {
-    if (!this.#verified || this.#closed) throw new HistoricalForkError("NOT_READY", "this fork is not running");
+    this.#assertReady();
     const signer = keypair ?? this.#signer;
-    const connection = new anchor.web3.Connection(this.url, { commitment: options.commitment, wsEndpoint: this.wsUrl });
+    const connection = new anchor.web3.Connection(this.url, {
+      commitment: options.commitment,
+      wsEndpoint: this.wsUrl,
+      fetch: async (input, init) => {
+        this.#assertReady();
+        const response = await fetch(input, init);
+        this.#assertReady();
+        return response;
+      },
+    });
+    const socket = connection._rpcWebSocket;
+    const connect = socket.connect.bind(socket);
+    socket.connect = () => {
+      try {
+        this.#assertReady();
+      } catch (error) {
+        // web3 does not await its subscription updater: throwing here would
+        // become an unhandled rejection instead of reaching the subscriber.
+        if (!(error instanceof HistoricalForkError)) throw error;
+        console.error(`historical fork ${this.surfnetId} WebSocket connection refused: ${error.message}`);
+        return;
+      }
+      return connect();
+    };
     this.#connections.push(connection);
     return new anchor.AnchorProvider(connection, new anchor.Wallet(signer), options);
   }
@@ -300,25 +342,33 @@ class HistoricalFork {
     return this.rpc("surfnet_timeTravel", [{ absoluteSlot: target }]);
   }
 
-  /**
-   * Stops this fork's own child; never signals or calls another listener.
-   * Remove event and account listeners first: each `provider()` WebSocket is
-   * closed here so @solana/web3.js does not reconnect to the stopped fork.
-   */
-  async close() {
-    if (this.#closed) return;
-    this.#closed = true;
+  #stopConnections() {
     const failures = [];
     for (const connection of this.#connections) {
       const socket = connection._rpcWebSocket;
       try {
         socket?.setAutoReconnect?.(false);
+        clearTimeout(socket?.reconnect_timer_id);
         // Older rpc-websockets cannot close before its first connection.
-        if (socket?.socket) socket.close();
+        // 1001 also avoids web3's explicit-1000 subscription reconnect path.
+        if (socket?.socket) socket.close(1001);
       } catch (error) {
         failures.push(error);
       }
     }
+    this.#connections = [];
+    return failures;
+  }
+
+  /**
+   * Stops this fork's own child; never signals or calls another listener.
+   * Remove event and account listeners first: each `provider()` WebSocket is
+   * closed here, and on child exit, with automatic reconnect disabled.
+   */
+  async close() {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#connectionFailures.push(...this.#stopConnections());
     if (this.#child.exitCode === null && this.#child.signalCode === null) {
       this.#child.kill("SIGTERM");
       let timer;
@@ -333,7 +383,7 @@ class HistoricalFork {
       }
     }
     rmSync(this.#record, { force: true });
-    if (failures.length) throw new AggregateError(failures, "fork stopped, but RPC connection cleanup failed");
+    if (this.#connectionFailures.length) throw new AggregateError(this.#connectionFailures, "fork stopped, but RPC connection cleanup failed");
   }
 }
 

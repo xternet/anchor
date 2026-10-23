@@ -18,6 +18,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
@@ -103,7 +104,8 @@ impl Plan {
 }
 
 pub struct HistoricalFork {
-    child: Child,
+    child: Mutex<Child>,
+    pid: u32,
     http: reqwest::blocking::Client,
     plan: Plan,
     record: PathBuf,
@@ -132,7 +134,7 @@ fn free_port_pair(host: &str) -> Result<u16> {
     Err(error("PORTS", format!("no free RPC/WebSocket port pair on {host}")))
 }
 
-/// A random public key: unguessable by any other process.
+/// A fresh startup sentinel address, not endpoint authentication.
 fn random_key() -> String {
     Keypair::new().pubkey().to_string()
 }
@@ -156,10 +158,8 @@ impl HistoricalFork {
             .map_err(|e| error("RECORD", e.to_string()))?;
         builder.recursive(false);
         builder.create(&directory).map_err(|e| error("RECORD", format!("{}: {e}", directory.display())))?;
-        // A private image only this fork's own launch arguments install:
-        // readiness proves that the
-        // answering server is this child, never a stale listener on a reused
-        // port.
+        // A private image installed by this fork's launch arguments checks
+        // startup readiness, not transport authentication for later requests.
         let sentinel = random_key();
         let lamports = 2_000_000 + u64::from(u16::from_le_bytes([sentinel.as_bytes()[0], sentinel.as_bytes()[1]]));
         let sentinel_file = directory.join("sentinel.snapshot.json");
@@ -203,7 +203,8 @@ impl HistoricalFork {
             .build()
             .map_err(|e| error("RPC", e.to_string()))?;
         let mut fork = HistoricalFork {
-            child,
+            pid: child.id(),
+            child: Mutex::new(child),
             http,
             plan,
             record,
@@ -224,7 +225,8 @@ impl HistoricalFork {
         Ok(fork)
     }
 
-    /// The cluster to pass to `anchor_client::Client`.
+    /// The cluster to pass to `anchor_client::Client`. This returns raw URLs:
+    /// external clients do not inherit this helper's child-lifetime guards.
     pub fn cluster(&self) -> Cluster {
         Cluster::Custom(self.url.clone(), self.ws_url.clone())
     }
@@ -266,7 +268,7 @@ impl HistoricalFork {
         let mut identified = false;
         let mut last = String::from("no response");
         while Instant::now() < deadline {
-            match self.child.try_wait() {
+            match self.child.get_mut().map_err(|e| error("CHILD", e.to_string()))?.try_wait() {
                 Ok(Some(status)) => return Err(self.exit_error(status)),
                 Ok(None) => {}
                 Err(e) => return Err(error("CHILD", format!("cannot inspect the surfpool child: {e}"))),
@@ -358,10 +360,22 @@ impl HistoricalFork {
     /// An RPC call to this verified fork, including Surfpool's explicit
     /// `surfnet_*` controls.
     pub fn rpc(&self, method: &str, params: Value) -> Result<Value> {
+        self.ensure_running()?;
+        let result = self.call(method, params).map_err(|e| error("RPC", format!("{method}: {e}")))?;
+        self.ensure_running()?;
+        Ok(result)
+    }
+
+    fn ensure_running(&self) -> Result<()> {
         if self.closed {
             return Err(error("NOT_READY", "this fork is closed"));
         }
-        self.call(method, params).map_err(|e| error("RPC", format!("{method}: {e}")))
+        let status = self.child.lock().map_err(|e| error("CHILD", e.to_string()))?
+            .try_wait().map_err(|e| error("CHILD", format!("cannot inspect the surfpool child: {e}")))?;
+        if let Some(status) = status {
+            return Err(error("EXITED", format!("this fork's surfpool child has exited ({status})")));
+        }
+        Ok(())
     }
 
     /// Defines an account in this fork only, such as a fresh test account or
@@ -408,7 +422,7 @@ impl HistoricalFork {
     }
 
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        self.pid
     }
 
     /// Stops this fork's own child: SIGTERM, then SIGKILL after the shutdown
@@ -419,22 +433,23 @@ impl HistoricalFork {
         if self.closed {
             return Ok(());
         }
-        let (id, pid) = (self.surfnet_id.clone(), self.child.id());
+        let (id, pid) = (self.surfnet_id.clone(), self.pid);
         let cleanup = |e: std::io::Error| error("CLEANUP", format!("fork {id} (pid {pid}): {e}"));
-        if self.child.try_wait().map_err(cleanup)?.is_none() {
+        let child = self.child.get_mut().map_err(|e| error("CHILD", e.to_string()))?;
+        if child.try_wait().map_err(cleanup)?.is_none() {
             let status = Command::new("kill").args(["-TERM", &pid.to_string()]).status().map_err(cleanup)?;
-            if !status.success() && self.child.try_wait().map_err(cleanup)?.is_none() {
+            if !status.success() && child.try_wait().map_err(cleanup)?.is_none() {
                 return Err(error("CLEANUP", format!("SIGTERM to fork {id} failed: {status}")));
             }
             let deadline = Instant::now() + self.plan.shutdown_wait.max(Duration::from_secs(5));
-            while self.child.try_wait().map_err(cleanup)?.is_none() && Instant::now() < deadline {
+            while child.try_wait().map_err(cleanup)?.is_none() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(25));
             }
-            if self.child.try_wait().map_err(cleanup)?.is_none() {
-                self.child.kill().map_err(cleanup)?;
+            if child.try_wait().map_err(cleanup)?.is_none() {
+                child.kill().map_err(cleanup)?;
             }
         }
-        self.child.wait().map_err(cleanup)?;
+        child.wait().map_err(cleanup)?;
         fs::remove_file(&self.record).map_err(cleanup)?;
         self.closed = true;
         Ok(())

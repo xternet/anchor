@@ -75,7 +75,16 @@ forks left by a crashed test process. No operation is sent to mainnet.
 fund it explicitly with `setAccount`. Rust templates also use fresh keys. Never
 pass a real funded wallet at a recent boundary: historical blockhashes are real,
 so leaked signed transaction bytes may remain valid on mainnet until they expire.
+Durable-nonce transactions may remain valid until the on-chain nonce advances.
 Suite/fork identity directories and files are private (0700/0600 on Unix).
+
+Helper RPC calls and Node providers' HTTP requests refuse after the owned child
+exits or the fork closes; provider WebSockets close with automatic reconnect disabled.
+New WebSocket connection attempts on a retained provider are refused with a diagnostic.
+Subscription registration may still return an id rather than a synchronous error.
+Process notifications and startup sentinel checks are not cryptographic endpoint
+authentication. Raw HTTP/WebSocket URLs and Rust `Cluster` values do not guard
+independently created clients. Do not reuse them after the fork stops.
 
 ## Fixtures and limits
 

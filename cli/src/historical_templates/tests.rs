@@ -46,10 +46,9 @@ fn helpers_start_historical_surfpool_from_the_suite_plan_and_own_only_their_chil
     }
     assert!(node.contains("module.exports = { HistoricalFork, HistoricalForkError };"));
     assert_eq!(
-        node.matches("throw new HistoricalForkError(\"NOT_READY\"")
-            .count(),
+        node.matches("\n    this.#assertReady();\n").count(),
         2,
-        "rpc() and provider() refuse a stopped fork"
+        "rpc() and provider() use the shared lifetime guard"
     );
     assert!(rust.contains("impl Drop for HistoricalFork"));
     // Only crates every Rust scaffold declares (v1 and v2 clients differ in
@@ -82,6 +81,28 @@ fn helpers_start_historical_surfpool_from_the_suite_plan_and_own_only_their_chil
     ] {
         assert!(types.contains(method), "{method}");
     }
+}
+
+#[test]
+fn historical_helper_rpc_guards_follow_owned_child_lifetime() {
+    let node = include_str!("historical_fork.js");
+    let rust = include_str!("historical_fork.rs.txt");
+    assert!(node.contains("this.#child.exitCode !== null || this.#child.signalCode !== null"));
+    assert!(node.contains("child.once(\"exit\", () => {\n      this.#verified = false;"));
+    assert!(node.contains("fetch: async (input, init) => {\n        this.#assertReady();"));
+    assert!(node.contains("clearTimeout(socket?.reconnect_timer_id)"));
+    assert!(node.contains("socket.close(1001)"));
+    assert!(node.contains("socket?.setAutoReconnect?.(false)"));
+    assert!(node.contains("socket.connect = () => {\n      try {\n        this.#assertReady();"));
+    assert!(rust.contains("child: Mutex<Child>"));
+    assert!(rust.contains("self.child.lock()"));
+    assert!(rust.contains(
+        "pub fn rpc(&self, method: &str, params: Value) -> Result<Value> {\n        \
+         self.ensure_running()?;"
+    ));
+    assert!(rust.contains(".try_wait().map_err"));
+    assert!(GUIDE.contains("not cryptographic endpoint authentication"));
+    assert!(GUIDE.contains("external clients do not inherit"));
 }
 
 #[test]
